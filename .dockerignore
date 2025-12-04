@@ -1,0 +1,45 @@
+# ============================================================
+# DOCKER IGNORE - MIDDLEWARE
+# ============================================================
+
+# Dependências
+node_modules/
+
+# Arquivos de ambiente (usar env_file no compose)
+.env
+.env.local
+.env.*.local
+
+# Dumps de banco de dados
+*.sql
+dump-*.sql
+bkp-lts/
+
+# Arquivos de log e erros
+*.log
+erros_sincronizacao.json
+
+# Python (submódulo separado)
+python/
+
+# SQL de origem (apenas para referência)
+sql-origem/
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# TypeScript build
+dist/
+*.tsbuildinfo
+
+# Misc
+.DS_Store
+Thumbs.db
+README.md
