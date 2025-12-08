@@ -3,7 +3,7 @@
 // ============================================================
 
 import { dbDestino } from "../config/database.js";
-import { mapearDemanda } from "../mappers/demandaMapper.js";
+import { mapearDemanda, buscarDadosPessoa } from "../mappers/demandaMapper.js";
 import { salvarErro } from "../utils/errorLogger.js";
 
 /**
@@ -13,7 +13,13 @@ import { salvarErro } from "../utils/errorLogger.js";
  * @param {object} data - Dados da demanda da origem
  */
 export async function sincronizarDemanda(event_type, data) {
-    const demandaMapeada = mapearDemanda(data);
+    // Busca dados da pessoa se houver fiscalizado_id
+    let dadosPessoa = null;
+    if (data.fiscalizado_id) {
+        dadosPessoa = await buscarDadosPessoa(data.fiscalizado_id);
+    }
+
+    const demandaMapeada = mapearDemanda(data, dadosPessoa);
 
     try {
         console.log(`\n🔍 DEBUG ${event_type} ID ${data.id}:`, JSON.stringify(demandaMapeada, null, 2));
@@ -49,7 +55,7 @@ export async function sincronizarDemanda(event_type, data) {
 async function inserirDemanda(demanda) {
     await dbDestino`
         INSERT INTO fiscalizacao.demandas (
-            id, situacao_id, motivo_id, fiscal_id,
+            id, situacao_id, motivo_id, fiscal_id, fiscalizado_id,
             fiscalizado_demanda, fiscalizado_cpf_cnpj, fiscalizado_nome,
             fiscalizado_logradouro, fiscalizado_numero, fiscalizado_complemento,
             fiscalizado_bairro, fiscalizado_municipio, fiscalizado_uf,
@@ -61,6 +67,7 @@ async function inserirDemanda(demanda) {
             ${demanda.situacao_id},
             ${demanda.motivo_id},
             ${demanda.fiscal_id},
+            ${demanda.fiscalizado_id},
             ${demanda.fiscalizado_demanda},
             ${demanda.fiscalizado_cpf_cnpj},
             ${demanda.fiscalizado_nome},
@@ -80,6 +87,9 @@ async function inserirDemanda(demanda) {
         )
         ON CONFLICT (id) DO UPDATE SET
             situacao_id = EXCLUDED.situacao_id,
+            fiscalizado_id = EXCLUDED.fiscalizado_id,
+            fiscalizado_nome = EXCLUDED.fiscalizado_nome,
+            fiscalizado_cpf_cnpj = EXCLUDED.fiscalizado_cpf_cnpj,
             fiscalizado_demanda = EXCLUDED.fiscalizado_demanda,
             fiscalizado_logradouro = EXCLUDED.fiscalizado_logradouro,
             fiscalizado_numero = EXCLUDED.fiscalizado_numero,
@@ -107,6 +117,9 @@ async function atualizarDemanda(demanda) {
         const resultado = await dbDestino`
             UPDATE fiscalizacao.demandas SET
                 situacao_id = ${demanda.situacao_id},
+                fiscalizado_id = ${demanda.fiscalizado_id},
+                fiscalizado_nome = ${demanda.fiscalizado_nome},
+                fiscalizado_cpf_cnpj = ${demanda.fiscalizado_cpf_cnpj},
                 fiscalizado_demanda = ${demanda.fiscalizado_demanda},
                 fiscalizado_logradouro = ${demanda.fiscalizado_logradouro},
                 fiscalizado_numero = ${demanda.fiscalizado_numero},

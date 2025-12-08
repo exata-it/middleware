@@ -7,7 +7,8 @@
     "start": "bun run src/index.js",
     "dev": "bun --watch run src/index.js",
     "start:legacy": "bun run index.js",
-    "sync:fiscal-demanda": "bun run src/scripts/syncFiscalDemanda.js"
+    "sync:fiscal-demanda": "bun run src/scripts/syncFiscalDemanda.js",
+    "sync:fiscalizado-id": "bun run scripts/syncFiscalizadoId.js"
   },
   "devDependencies": {
     "@types/bun": "latest"
