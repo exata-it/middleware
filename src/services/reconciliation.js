@@ -1,15 +1,16 @@
 // ============================================================
-// SERVIÇO DE RECONCILIAÇÃO
+// SERVIÇO DE RECONCILIAÇÃO (OTIMIZADO)
 // ============================================================
 
 import { dbOrigem, dbDestino } from "../config/database.js";
 import { sincronizarDemanda } from "../handlers/demandaHandler.js";
-import { sincronizarFiscalDemanda } from "../handlers/fiscalDemandaHandler.js";
+// A função sincronizarFiscalDemanda ainda é importada caso seja usada unitariamente,
+// mas o bulk insert agora é feito via SQL puro.
+import { sincronizarFiscalDemanda } from "../handlers/fiscalDemandaHandler.js"; 
 
 /**
  * Busca o registro completo no banco de origem pelo ID
- * 
- * @param {string} table - Nome da tabela no formato "schema.tabela"
+ * * @param {string} table - Nome da tabela no formato "schema.tabela"
  * @param {number} id - ID do registro
  * @returns {Promise<object|null>} Registro completo ou null se não encontrado
  */
@@ -49,6 +50,7 @@ export async function verificarGaps() {
 
 /**
  * Verifica gaps de demandas
+ * (Mantido a lógica original pois demandas possuem complexidade de relacionamentos que o handler trata)
  */
 async function verificarGapsDemandas() {
     console.log("\n📋 Reconciliando DEMANDAS...");
@@ -110,23 +112,16 @@ async function verificarGapsDemandas() {
 }
 
 /**
- * Verifica gaps de fiscal-demanda
- * Sincroniza apenas registros onde a demanda E fiscal existem no destino
+ * Verifica gaps de fiscal-demanda (VERSÃO ALTA PERFORMANCE)
+ * Utiliza Tabela Temporária e Bulk Insert para evitar processamento linha-a-linha
  */
 async function verificarGapsFiscalDemanda() {
-    console.log("\n👤 Reconciliando FISCAL-DEMANDA...");
+    console.log("\n👤 Reconciliando FISCAL-DEMANDA (Fast Mode)...");
+    const start = performance.now();
 
     try {
-        // Busca demandas e fiscais existentes no destino para validação
-        const [demandasDestino, fiscaisDestino] = await Promise.all([
-            dbDestino`SELECT id FROM fiscalizacao.demandas`,
-            dbDestino`SELECT id FROM fiscalizacao.fiscais`,
-        ]);
-
-        const setDemandasDestino = new Set(demandasDestino.map((d) => d.id));
-        const setFiscaisDestino = new Set(fiscaisDestino.map((f) => f.id));
-
-        // Pega os últimos 5000 registros da origem
+        // 1. Busca os últimos 5000 registros da origem
+        // Trazemos apenas o necessário: ID do vínculo, ID da demanda e ID do usuario(fiscal)
         const origemRegistros = await dbOrigem`
             SELECT id, demanda_id, usuario_id 
             FROM public.fiscaldemanda 
@@ -139,59 +134,55 @@ async function verificarGapsFiscalDemanda() {
             return;
         }
 
-        // Filtra apenas os que têm demanda E fiscal existentes no destino
-        const registrosValidos = origemRegistros.filter((r) => {
-            const demandaExiste = setDemandasDestino.has(Number(r.demanda_id));
-            const fiscalExiste = setFiscaisDestino.has(Number(r.usuario_id));
-            return demandaExiste && fiscalExiste;
-        });
-
-        console.log(`   📊 ${origemRegistros.length} na origem, ${registrosValidos.length} válidos (demanda+fiscal existem)`);
-
-        if (registrosValidos.length === 0) {
-            console.log("✅ Fiscal-Demanda: nenhum registro válido para reconciliar.");
-            return;
-        }
-
-        // Pega todas as relações do destino
-        const destinoRegistros = await dbDestino`
-            SELECT demanda_id, fiscal_id 
-            FROM fiscalizacao.demandas_fiscais
+        // 2. Cria Tabela Temporária no Destino
+        // ON COMMIT DROP garante que ela seja limpa automaticamente ao fim da transação
+        await dbDestino`
+            CREATE TEMP TABLE IF NOT EXISTS tmp_reconcile_fiscal (
+                id_origem INT,
+                demanda_id INT,
+                fiscal_id INT
+            ) ON COMMIT DROP
         `;
 
-        // Cria Set com chave composta "demanda_id-fiscal_id"
-        const setDestino = new Set(
-            destinoRegistros.map((d) => `${d.demanda_id}-${d.fiscal_id}`)
-        );
+        // 3. Inserção em Massa na Tabela Temporária
+        // Mapeamos 'usuario_id' da origem para 'fiscal_id' do destino
+        await dbDestino`
+            INSERT INTO tmp_reconcile_fiscal ${dbDestino(origemRegistros, 'id', 'demanda_id', 'usuario_id')}
+        `;
 
-        // Filtra quem está na origem mas NÃO no destino
-        const faltantes = registrosValidos.filter(
-            (r) => !setDestino.has(`${r.demanda_id}-${r.usuario_id}`)
-        );
+        // 4. Sincronização Inteligente via SQL (Set-Based)
+        // Lógica:
+        // - JOIN com 'demandas' e 'fiscais': Garante que só inserimos se os "pais" existirem (Integridade Referencial)
+        // - WHERE NOT EXISTS: Garante que só inserimos se o vínculo ainda não existir
+        const resultado = await dbDestino`
+            INSERT INTO fiscalizacao.demandas_fiscais (demanda_id, fiscal_id, id_origem)
+            SELECT 
+                t.demanda_id, 
+                t.fiscal_id, 
+                t.id_origem
+            FROM tmp_reconcile_fiscal t
+            INNER JOIN fiscalizacao.demandas d ON d.id = t.demanda_id
+            INNER JOIN fiscalizacao.fiscais f ON f.id = t.fiscal_id
+            WHERE NOT EXISTS (
+                SELECT 1 FROM fiscalizacao.demandas_fiscais df 
+                WHERE df.demanda_id = t.demanda_id AND df.fiscal_id = t.fiscal_id
+            )
+            ON CONFLICT (demanda_id, fiscal_id) DO NOTHING
+            RETURNING id;
+        `;
 
-        if (faltantes.length > 0) {
-            console.warn(`⚠️ Encontrados ${faltantes.length} fiscal-demanda faltando! Sincronizando...`);
+        // 5. Limpeza explicita (boa prática)
+        await dbDestino`TRUNCATE TABLE tmp_reconcile_fiscal`;
 
-            let sincronizados = 0;
-            let erros = 0;
+        const end = performance.now();
+        const duration = ((end - start) / 1000).toFixed(2);
 
-            for (const item of faltantes) {
-                try {
-                    const registro = await buscarRegistroOrigem("public.fiscaldemanda", item.id);
-                    if (registro) {
-                        await sincronizarFiscalDemanda("INSERT", registro);
-                        sincronizados++;
-                    }
-                } catch (error) {
-                    console.error(`❌ Erro ao sincronizar fiscal-demanda ID ${item.id}:`, error.message);
-                    erros++;
-                }
-            }
-
-            console.log(`✅ Fiscal-Demanda: ${sincronizados} sincronizadas, ${erros} erros`);
+        if (resultado.length > 0) {
+            console.log(`✅ Fiscal-Demanda: ${resultado.length} registros restaurados em ${duration}s.`);
         } else {
-            console.log("✅ Fiscal-Demanda: nenhuma inconsistência encontrada.");
+            console.log(`✅ Fiscal-Demanda: Nenhuma inconsistência encontrada (Verificados ${origemRegistros.length} registros em ${duration}s).`);
         }
+
     } catch (error) {
         console.error("❌ Erro ao verificar gaps de fiscal-demanda:", error.message);
     }

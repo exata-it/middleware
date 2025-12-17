@@ -1,171 +1,79 @@
-// ============================================================
-// SCRIPT: Sincronizar FiscalDemanda baseado nas demandas existentes
-// ============================================================
-// Sincroniza apenas os registros de fiscaldemanda (origem) para
-// demandas_fiscais (destino) onde a demanda já existe no destino.
-// ============================================================
-
 import { dbOrigem, dbDestino, fecharConexoes } from "../config/database.js";
 
-const BATCH_SIZE = 500; // Processa em lotes para não sobrecarregar
-
 async function syncFiscalDemanda() {
-    console.log("🚀 Iniciando sincronização de Fiscal-Demanda...");
-    console.log("=".repeat(60));
+    console.log("🚀 Iniciando Sincronização de Alta Performance...");
 
     try {
-        // 1. Busca todas as demandas que existem no destino
-        console.log("\n📋 Buscando demandas existentes no destino...");
-        const demandasDestino = await dbDestino`
-            SELECT id FROM fiscalizacao.demandas
+        // 1. Pega o último ID ou Data sincronizada no destino para busca incremental
+        // Isso evita carregar a origem inteira toda vez
+        const lastSync = await dbDestino`
+            SELECT COALESCE(MAX(id_origem), 0) as last_id 
+            FROM fiscalizacao.demandas_fiscais
         `;
+        const lastId = lastSync[0].last_id;
 
-        if (demandasDestino.length === 0) {
-            console.log("❌ Nenhuma demanda encontrada no destino. Abortando.");
-            return;
-        }
-
-        console.log(`✅ Encontradas ${demandasDestino.length} demandas no destino`);
-
-        // Cria Set para lookup rápido
-        const setDemandasDestino = new Set(demandasDestino.map((d) => d.id));
-
-        // 2. Busca todos os fiscais que existem no destino
-        console.log("\n👤 Buscando fiscais existentes no destino...");
-        const fiscaisDestino = await dbDestino`
-            SELECT id FROM fiscalizacao.fiscais
-        `;
-
-        console.log(`✅ Encontrados ${fiscaisDestino.length} fiscais no destino`);
-        const setFiscaisDestino = new Set(fiscaisDestino.map((f) => f.id));
-
-        // 3. Busca relações fiscal-demanda já existentes no destino
-        console.log("\n🔗 Buscando relações existentes no destino...");
-        const relacoesDestino = await dbDestino`
-            SELECT demanda_id, fiscal_id FROM fiscalizacao.demandas_fiscais
-        `;
-
-        console.log(`✅ Encontradas ${relacoesDestino.length} relações existentes`);
-        const setRelacoesDestino = new Set(
-            relacoesDestino.map((r) => `${r.demanda_id}-${r.fiscal_id}`)
-        );
-
-        // 4. Busca fiscal-demanda da origem (apenas ativos)
-        console.log("\n📥 Buscando fiscal-demanda da origem...");
-        const fiscalDemandaOrigem = await dbOrigem`
-            SELECT id, demanda_id, usuario_id, ativo, data_criacao 
+        // 2. Busca apenas o que é NOVO na origem
+        console.log(`📥 Buscando novos registros a partir do ID: ${lastId}`);
+        const novosRegistros = await dbOrigem`
+            SELECT id, demanda_id, usuario_id 
             FROM public.fiscaldemanda 
-            WHERE ativo = true
-            ORDER BY id
+            WHERE ativo = true AND id > ${lastId}
+            ORDER BY id ASC
+            LIMIT 5000
         `;
 
-        console.log(`✅ Encontrados ${fiscalDemandaOrigem.length} registros na origem`);
-
-        // 5. Filtra apenas os que têm demanda E fiscal existentes no destino
-        console.log("\n🔍 Filtrando registros válidos...");
-        const registrosValidos = fiscalDemandaOrigem.filter((r) => {
-            const demandaExiste = setDemandasDestino.has(Number(r.demanda_id));
-            const fiscalExiste = setFiscaisDestino.has(Number(r.usuario_id));
-            const relacaoNaoExiste = !setRelacoesDestino.has(`${r.demanda_id}-${r.usuario_id}`);
-
-            return demandaExiste && fiscalExiste && relacaoNaoExiste;
-        });
-
-        console.log(`✅ ${registrosValidos.length} registros válidos para sincronizar`);
-
-        // Estatísticas de filtro
-        const semDemanda = fiscalDemandaOrigem.filter(
-            (r) => !setDemandasDestino.has(Number(r.demanda_id))
-        ).length;
-        const semFiscal = fiscalDemandaOrigem.filter(
-            (r) => !setFiscaisDestino.has(Number(r.usuario_id))
-        ).length;
-        const jaExistem = fiscalDemandaOrigem.filter(
-            (r) => setRelacoesDestino.has(`${r.demanda_id}-${r.usuario_id}`)
-        ).length;
-
-        console.log(`   📊 Ignorados (demanda não existe): ${semDemanda}`);
-        console.log(`   📊 Ignorados (fiscal não existe): ${semFiscal}`);
-        console.log(`   📊 Já existem no destino: ${jaExistem}`);
-
-        if (registrosValidos.length === 0) {
-            console.log("\n✅ Nada para sincronizar!");
+        if (novosRegistros.length === 0) {
+            console.log("✅ Tudo sincronizado. Sem novos registros.");
             return;
         }
 
-        // 6. Insere em lotes
-        console.log(`\n⚡ Inserindo em lotes de ${BATCH_SIZE}...`);
+        // 3. Criação de Tabela Temporária no Destino para validação ultra-rápida
+        // Isso evita múltiplos SELECTs e Sets no Node.js
+        await dbDestino`CREATE TEMP TABLE tmp_sync_fiscal (
+            id_origem INT,
+            demanda_id INT,
+            fiscal_id INT
+        ) ON COMMIT DROP`;
 
-        let totalInseridos = 0;
-        let totalErros = 0;
+        // 4. Inserção em massa na tabela temporária
+        await dbDestino`
+            INSERT INTO tmp_sync_fiscal ${dbDestino(novosRegistros, 'id', 'demanda_id', 'usuario_id')}
+        `;
 
-        for (let i = 0; i < registrosValidos.length; i += BATCH_SIZE) {
-            const batch = registrosValidos.slice(i, i + BATCH_SIZE);
-            const batchNum = Math.floor(i / BATCH_SIZE) + 1;
-            const totalBatches = Math.ceil(registrosValidos.length / BATCH_SIZE);
+        // 5. O PULO DO GATO: Sync via SQL puro
+        // Validamos existência de demanda e fiscal e ausência de duplicata em uma única transação
+        const resultado = await dbDestino`
+            INSERT INTO fiscalizacao.demandas_fiscais (demanda_id, fiscal_id, id_origem)
+            SELECT 
+                t.demanda_id, 
+                t.fiscal_id, 
+                t.id_origem
+            FROM tmp_sync_fiscal t
+            INNER JOIN fiscalizacao.demandas d ON d.id = t.demanda_id
+            INNER JOIN fiscalizacao.fiscais f ON f.id = t.fiscal_id
+            WHERE NOT EXISTS (
+                SELECT 1 FROM fiscalizacao.demandas_fiscais df 
+                WHERE df.demanda_id = t.demanda_id AND df.fiscal_id = t.fiscal_id
+            )
+            ON CONFLICT (demanda_id, fiscal_id) DO NOTHING
+            RETURNING id;
+        `;
 
-            console.log(`\n📦 Processando lote ${batchNum}/${totalBatches} (${batch.length} registros)...`);
-
-            try {
-                // Prepara valores para INSERT em massa
-                const valores = batch.map((r) => ({
-                    demanda_id: Number(r.demanda_id),
-                    fiscal_id: Number(r.usuario_id),
-                }));
-
-                // INSERT com ON CONFLICT DO NOTHING
-                await dbDestino`
-                    INSERT INTO fiscalizacao.demandas_fiscais ${dbDestino(valores)}
-                    ON CONFLICT (demanda_id, fiscal_id) DO NOTHING
-                `;
-
-                totalInseridos += batch.length;
-                console.log(`   ✅ Lote ${batchNum} inserido com sucesso`);
-            } catch (error) {
-                console.error(`   ❌ Erro no lote ${batchNum}:`, error.message);
-
-                // Tenta inserir um por um para identificar problemas
-                for (const registro of batch) {
-                    try {
-                        await dbDestino`
-                            INSERT INTO fiscalizacao.demandas_fiscais (demanda_id, fiscal_id)
-                            VALUES (${Number(registro.demanda_id)}, ${Number(registro.usuario_id)})
-                            ON CONFLICT (demanda_id, fiscal_id) DO NOTHING
-                        `;
-                        totalInseridos++;
-                    } catch (err) {
-                        console.error(`      ❌ Erro ao inserir (demanda: ${registro.demanda_id}, fiscal: ${registro.usuario_id}):`, err.message);
-                        totalErros++;
-                    }
-                }
-            }
-        }
-
-        // 7. Resumo final
-        console.log("\n" + "=".repeat(60));
-        console.log("📊 RESUMO DA SINCRONIZAÇÃO");
-        console.log("=".repeat(60));
-        console.log(`   Demandas no destino:    ${demandasDestino.length}`);
-        console.log(`   Fiscais no destino:     ${fiscaisDestino.length}`);
-        console.log(`   Relações existentes:    ${relacoesDestino.length}`);
-        console.log("─".repeat(60));
-        console.log(`   Total na origem:        ${fiscalDemandaOrigem.length}`);
-        console.log(`   Sem demanda no destino: ${semDemanda}`);
-        console.log(`   Sem fiscal no destino:  ${semFiscal}`);
-        console.log(`   Já existem:             ${jaExistem}`);
-        console.log("─".repeat(60));
-        console.log(`   Válidos para sync:      ${registrosValidos.length}`);
-        console.log(`   Inseridos com sucesso:  ${totalInseridos}`);
-        console.log(`   Erros:                  ${totalErros}`);
-        console.log("=".repeat(60));
+        console.log(`✅ Sincronizados ${resultado.length} novos vínculos com sucesso.`);
 
     } catch (error) {
-        console.error("❌ Erro fatal:", error.message);
-        console.error(error.stack);
+        console.error("❌ Erro na sincronização:", error.message);
     } finally {
-        await fecharConexoes();
+        // Se for rodar constante, talvez não queira fechar a conexão aqui
+        // await fecharConexoes(); 
     }
 }
 
-// Executa o script
-syncFiscalDemanda();
+// Para atualizações constantes (ex: a cada 30 segundos)
+const RUN_INTERVAL = 15 * 1000; 
+
+(async function loop() {
+    await syncFiscalDemanda();
+    console.log(`Sleeping for ${RUN_INTERVAL/1000}s...`);
+    setTimeout(loop, RUN_INTERVAL);
+})();

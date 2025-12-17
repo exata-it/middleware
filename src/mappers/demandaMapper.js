@@ -29,6 +29,8 @@ export function mapearDemanda(dataOrigem, dadosPessoa = null) {
         fiscalizado_cpf_cnpj = dadosPessoa.cpfcnpj || "";
     }
 
+
+
     return {
         // Campo ID
         id: id,
@@ -59,7 +61,7 @@ export function mapearDemanda(dataOrigem, dadosPessoa = null) {
         fiscalizado_lng: dataOrigem.longitude || "",
 
         // Classificação da demanda
-        classificacao: dataOrigem.os_direta ? "direta" : "ordinaria",
+        classificacao: dataOrigem.situacao === 12 ? "direta" : dataOrigem.situacao === 2 || dataOrigem.situacao === 7 ? "ordinaria" : "N/A",
 
         // Datas importantes
         data_criacao: dataOrigem.data_criacao,
