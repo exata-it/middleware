@@ -17,6 +17,14 @@ services:
     # Usa a rede do host diretamente (localhost funciona normalmente)
     network_mode: host
 
+    # Health Check
+    healthcheck:
+      test: ["CMD", "bun", "run", "health-check.js"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
     # Logs
     logging:
       driver: "json-file"

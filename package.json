@@ -8,7 +8,8 @@
     "dev": "bun --watch run src/index.js",
     "start:legacy": "bun run index.js",
     "sync:fiscal-demanda": "bun run src/scripts/syncFiscalDemanda.js",
-    "sync:fiscalizado-id": "bun run scripts/syncFiscalizadoId.js"
+    "sync:fiscalizado-id": "bun run scripts/syncFiscalizadoId.js",
+    "health-check": "bun run health-check.js"
   },
   "devDependencies": {
     "@types/bun": "latest"
