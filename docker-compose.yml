@@ -19,7 +19,7 @@ services:
 
     # Health Check
     healthcheck:
-      test: ["CMD", "bun", "run", "health-check.js"]
+      test: [ "CMD", "bun", "run", "health-check.js" ]
       interval: 30s
       timeout: 10s
       retries: 3
