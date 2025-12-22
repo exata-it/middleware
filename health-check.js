@@ -5,7 +5,6 @@
 // ============================================================
 
 import postgres from "postgres";
-import { SQL } from "bun";
 import { CONFIG } from "./src/config/index.js";
 
 async function healthCheck() {
@@ -43,15 +42,15 @@ async function healthCheck() {
     // 2. TESTE DE CONEXÃO COM BANCO DE DESTINO
     // ============================================================
     try {
-      const dbDestino = new SQL(CONFIG.destino.url);
-      const testDestino = await dbDestino.query(`SELECT NOW() as timestamp`);
+      const dbDestino = postgres(CONFIG.destino.url);
+      const testDestino = await dbDestino`SELECT NOW() as timestamp`;
       
       results.checks.destino = {
         status: "ok",
-        timestamp: testDestino[0]?.timestamp,
+        timestamp: testDestino[0].timestamp,
       };
       
-      await dbDestino.close();
+      await dbDestino.end();
     } catch (error) {
       results.checks.destino = {
         status: "error",
