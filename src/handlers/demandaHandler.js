@@ -59,7 +59,7 @@ async function inserirDemanda(demanda) {
             fiscalizado_demanda, fiscalizado_cpf_cnpj, fiscalizado_nome,
             fiscalizado_logradouro, fiscalizado_numero, fiscalizado_complemento,
             fiscalizado_bairro, fiscalizado_municipio, fiscalizado_uf,
-            fiscalizado_lat, fiscalizado_lng,
+            fiscalizado_lat, fiscalizado_lng, classificacao,
             data_criacao, data_realizacao, ativo, tipo_rota, grupo_ocorrencia_id
         )
         VALUES (
@@ -79,6 +79,7 @@ async function inserirDemanda(demanda) {
             ${demanda.fiscalizado_uf},
             ${demanda.fiscalizado_lat},
             ${demanda.fiscalizado_lng},
+            ${demanda.classificacao},
             ${demanda.data_criacao},
             ${demanda.data_realizacao},
             ${demanda.ativo},
@@ -97,6 +98,7 @@ async function inserirDemanda(demanda) {
             fiscalizado_bairro = EXCLUDED.fiscalizado_bairro,
             fiscalizado_lat = EXCLUDED.fiscalizado_lat,
             fiscalizado_lng = EXCLUDED.fiscalizado_lng,
+            classificacao = EXCLUDED.classificacao,
             data_realizacao = EXCLUDED.data_realizacao,
             ativo = EXCLUDED.ativo
     `;
@@ -127,6 +129,7 @@ async function atualizarDemanda(demanda) {
                 fiscalizado_bairro = ${demanda.fiscalizado_bairro},
                 fiscalizado_lat = ${demanda.fiscalizado_lat},
                 fiscalizado_lng = ${demanda.fiscalizado_lng},
+                classificacao = ${demanda.classificacao},
                 data_realizacao = ${demanda.data_realizacao},
                 ativo = ${demanda.ativo}
             WHERE id = ${demanda.id}
