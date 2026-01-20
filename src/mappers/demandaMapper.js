@@ -13,12 +13,18 @@ import { dbDestino } from "../config/database.js";
  * @returns {object} Dados mapeados para tabela demandas (destino)
  */
 export function mapearDemanda(dataOrigem, dadosPessoa = null) {
-    // Converte ID para número (a origem pode retornar como string)
-    const id = typeof dataOrigem.id === "string" ? parseInt(dataOrigem.id, 10) : dataOrigem.id;
-    const grupo_ocorrencia_id =
-        typeof dataOrigem.grupodemanda_id === "string"
-            ? parseInt(dataOrigem.grupodemanda_id, 10)
-            : dataOrigem.grupodemanda_id;
+    // Função helper para normalizar IDs
+    const normalizarId = (valor) => {
+        if (valor === null || valor === undefined || valor === '') return null;
+        if (typeof valor === 'string') return parseInt(valor, 10);
+        return valor;
+    };
+
+    // Converte IDs para número (a origem pode retornar como string)
+    const id = normalizarId(dataOrigem.id);
+    const grupo_ocorrencia_id = normalizarId(dataOrigem.grupodemanda_id);
+    const fiscalizado_id = normalizarId(dataOrigem.fiscalizado_id);
+    const situacao_id = normalizarId(dataOrigem.situacao);
 
     // Dados do fiscalizado
     let fiscalizado_nome = "";
@@ -36,10 +42,10 @@ export function mapearDemanda(dataOrigem, dadosPessoa = null) {
         id: id,
 
         // Situação e motivo
-        situacao_id: dataOrigem.situacao,
+        situacao_id: situacao_id,
         motivo_id: null, // Não existe na origem
         fiscal_id: null, // Será preenchido depois se necessário
-        fiscalizado_id: dataOrigem.fiscalizado_id || null,
+        fiscalizado_id: fiscalizado_id,
 
         // Identificação da demanda
         fiscalizado_demanda: dataOrigem.descricao || dataOrigem.protocolo || `DEMANDA-${dataOrigem.id}`,
@@ -61,7 +67,7 @@ export function mapearDemanda(dataOrigem, dadosPessoa = null) {
         fiscalizado_lng: dataOrigem.longitude || "",
 
         // Classificação da demanda
-        classificacao: dataOrigem.situacao === 12 ? "direta" : dataOrigem.situacao === 2 || dataOrigem.situacao === 7 ? "ordinaria" : "N/A",
+        classificacao: situacao_id === 12 ? "direta" : situacao_id === 2 || situacao_id === 7 ? "ordinaria" : "N/A",
 
         // Datas importantes
         data_criacao: dataOrigem.data_criacao,

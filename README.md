@@ -76,6 +76,7 @@ middleware/
 ├── .env                            # Variáveis de ambiente (não commitado)
 ├── .env.example                    # Template de configuração
 ├── erros_sincronizacao.json        # Log de erros de constraint
+├── sync-pessoas.js                 # Script para sincronizar pessoas ausentes
 │
 ├── src/
 │   ├── index.js                    # Ponto de entrada principal
@@ -98,6 +99,11 @@ middleware/
 │   │   ├── index.js                # Exporta todos os mappers
 │   │   ├── demandaMapper.js        # Mapeia campos demanda → demandas
 │   │   └── fiscalDemandaMapper.js  # Mapeia campos fiscaldemanda → demandas_fiscais
+│   │
+│   ├── scripts/
+│   │   ├── syncFiscalDemanda.js    # Sincroniza fiscais de demandas
+│   │   ├── syncFiscalizadoId.js    # Sincroniza IDs de fiscalizados
+│   │   └── syncPessoasMissing.js   # Sincroniza pessoas ausentes (resolve FK errors)
 │   │
 │   ├── scripts/
 │   │   └── syncFiscalDemanda.js    # Script manual de sync em lote
@@ -277,6 +283,104 @@ bun run dev
 | `start` | `bun run start` | Inicia o middleware em produção |
 | `dev` | `bun run dev` | Inicia com hot reload |
 | `sync:fiscal-demanda` | `bun run sync:fiscal-demanda` | Sincroniza fiscal-demanda em lote |
+| `sync:pessoas` | `bun sync-pessoas.js` | Sincroniza pessoas ausentes (resolve FK errors) |
+| `reprocessar:erros` | `bun reprocessar-erros.js` | Sincroniza pessoas E reprocessa demandas falhadas |
+
+### Script de Reprocessamento Completo (RECOMENDADO)
+
+O script `reprocessar-erros.js` é a solução completa para resolver erros de FK:
+
+```bash
+bun reprocessar-erros.js
+```
+
+Este script executa automaticamente:
+1. **Sincroniza pessoas ausentes** do arquivo `erros_sincronizacao.json`
+2. **Reprocessa demandas falhadas** que tinham erro de FK
+3. **Atualiza o arquivo de erros** removendo os resolvidos
+4. **Exibe relatório completo** de sucessos e erros
+
+**Exemplo de saída:**
+
+```
+╔══════════════════════════════════════════════════════════╗
+║  REPROCESSAR DEMANDAS COM ERROS DE FK                   ║
+║  1. Sincroniza pessoas ausentes                         ║
+║  2. Retenta inserir demandas falhadas                   ║
+╚══════════════════════════════════════════════════════════╝
+
+📦 PASSO 1: Sincronizando pessoas ausentes...
+✅ 12 pessoas sincronizadas
+
+🔄 PASSO 2: Reprocessando demandas falhadas...
+📋 Encontradas 12 demandas com erro de FK
+
+✅ Demanda 8182121 sincronizada com sucesso
+✅ Demanda 8182130 sincronizada com sucesso
+...
+
+============================================================
+📊 RESULTADO DO REPROCESSAMENTO
+============================================================
+👥 Pessoas sincronizadas: 12
+📋 Demandas reprocessadas: 12
+❌ Erros persistentes: 0
+============================================================
+
+🎉 Reprocessamento concluído com sucesso!
+```
+
+### Script de Sincronização de Pessoas Ausentes
+
+O script `sync-pessoas.js` resolve erros de foreign key relacionados a pessoas:
+
+```bash
+bun sync-pessoas.js
+```
+
+Este script:
+1. Lê o arquivo `erros_sincronizacao.json`
+2. Extrai IDs de pessoas ausentes (constraint `demandas_fiscalizado_id_fkey`)
+3. Busca essas pessoas no banco de origem
+4. Verifica quais ainda não existem no destino
+5. Insere as pessoas faltantes no destino
+6. Exibe relatório de sucesso/erros
+
+**Exemplo de saída:**
+
+```
+╔══════════════════════════════════════════════════════════╗
+║  SINCRONIZAÇÃO DE PESSOAS AUSENTES                      ║
+║  Resolve erros de FK em demandas.fiscalizado_id         ║
+╚══════════════════════════════════════════════════════════╝
+
+🔄 Iniciando sincronização de pessoas ausentes...
+
+📋 Encontrados 12 IDs de pessoas ausentes
+📊 Status:
+   Total de IDs: 12
+   Já existentes: 0
+   Faltantes: 12
+
+🔍 Buscando 12 pessoas na origem...
+✅ Encontradas 12 pessoas na origem
+📝 Inserindo 12 pessoas no destino...
+
+✅ Pessoa 8182101 sincronizada
+✅ Pessoa 8182128 sincronizada
+...
+
+============================================================
+📊 RESULTADO DA SINCRONIZAÇÃO
+============================================================
+✅ Sucessos: 12
+❌ Erros: 0
+📋 Total: 12
+============================================================
+
+🎉 Pessoas sincronizadas com sucesso!
+💡 Agora você pode tentar reprocessar as demandas que falharam
+```
 
 ### Script de Sincronização Manual
 
@@ -329,20 +433,45 @@ Este script:
 
 ---
 
-## ⚠️ Tratamento de Erros
+## ⚠️ Tratamento e Prevenção de Erros
 
-### Erros de Foreign Key
+### Sistema Automático de Sincronização de Pessoas
 
-Quando um registro não pode ser inserido por violação de FK, o erro é salvo em `erros_sincronizacao.json`:
+**Nova funcionalidade:** O middleware agora sincroniza automaticamente pessoas ausentes!
+
+Quando uma demanda referencia um `fiscalizado_id` que não existe no destino:
+
+1. **Detecção Automática**: O handler verifica se a pessoa existe no destino
+2. **Sincronização Just-in-Time**: Busca a pessoa na origem e insere no destino
+3. **Processamento em Lote**: Na reconciliação, sincroniza todas as pessoas necessárias de uma vez
+4. **Zero Interrupção**: A demanda é inserida sem erros de FK
+
+**Arquivos envolvidos:**
+- [`src/utils/pessoaSync.js`](src/utils/pessoaSync.js) - Utilitário de sincronização
+- [`src/handlers/demandaHandler.js`](src/handlers/demandaHandler.js) - Integração no handler
+- [`src/services/reconciliation.js`](src/services/reconciliation.js) - Sincronização em lote
+
+**Exemplo de log:**
+
+```
+⚠️  Pessoa 8182101 não encontrada no destino, sincronizando...
+✅ Pessoa 8182101 sincronizada automaticamente
+✅ INSERT demanda ID 8182121
+```
+
+### Erros de Foreign Key (Legado)
+
+Erros antigos ainda podem estar em `erros_sincronizacao.json`:
 
 ```json
 {
   "constraint_errors": [
     {
       "id": 12345,
-      "tabela": "demandas",
+      "table": "demandas",
       "tipo_erro": "foreign_key_constraint",
-      "mensagem": "violates foreign key constraint \"demandas_situacao_id_fkey\"",
+      "constraint_name": "demandas_fiscalizado_id_fkey",
+      "mensagem": "violates foreign key constraint",
       "dados": { ... },
       "timestamp": "2024-12-03T10:30:00Z"
     }

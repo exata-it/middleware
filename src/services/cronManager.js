@@ -18,7 +18,7 @@ export function iniciarCronReconciliacao() {
         CONFIG.cronReconciliacao,
         async () => {
             console.log(`\n⏱️  [${new Date().toISOString()}] Executando reconciliação agendada...`);
-            await verificarGaps();
+            await verificarGaps(false); // false = modo silencioso (apenas erros)
         },
         {
             runOnInit: false, // Não executar na inicialização

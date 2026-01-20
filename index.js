@@ -578,5 +578,5 @@ iniciarListener();
 iniciarCronReconciliacao();
 
 // Trigger imediato da reconciliação
-console.log("⚡ Executando reconciliação imediata na inicialização...");
+// console.log("⚡ Executando reconciliação imediata na inicialização...");
 // verificarGaps();
