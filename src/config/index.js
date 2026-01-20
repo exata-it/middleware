@@ -16,6 +16,6 @@ export const CONFIG = {
     },
     canal: "sync_channel",
     reconnectDelay: 5000, // 5 segundos para reconexão
-    cronReconciliacao: process.env.CRON_RECONCILIACAO || "*/3 * * * *", // A cada 10 minutos
+    cronReconciliacao: process.env.CRON_RECONCILIACAO || "*/5 * * * *", // A cada 10 minutos
     timezone: "America/Fortaleza",
 };
