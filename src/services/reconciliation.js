@@ -303,7 +303,7 @@ async function sincronizarDemandasExistentes(verbose = false) {
                 console.log(`  ⚠️  ${naoEncontrados.length} demandas não encontradas na origem`);
             }
 
-            // Processar demandas em BULK UPDATE
+            // Processar demandas em BULK UPDATE usando tabela temporária
             let sucessoLote = 0;
             let errosLote = 0;
 
@@ -325,33 +325,39 @@ async function sincronizarDemandasExistentes(verbose = false) {
                         .filter(id => id != null);
                     await sincronizarPessoasFaltantes(fiscalizadosIds);
 
-                    // UPDATE em lotes menores para evitar "insufficient data left in message"
-                    const MINI_LOTE_SIZE = 25; // Reduzido para evitar exceder limite de protocolo PostgreSQL
-                    for (let j = 0; j < dadosMapeados.length; j += MINI_LOTE_SIZE) {
-                        const miniLote = dadosMapeados.slice(j, j + MINI_LOTE_SIZE);
-                        
-                        // Usar UPDATE com unnest() - método mais eficiente e seguro
-                        const ids = miniLote.map(d => d.id);
-                        const situacoes = miniLote.map(d => d.situacao_id);
-                        const fiscalizados = miniLote.map(d => d.fiscalizado_id);
-
-                        await dbDestino`
-                            UPDATE fiscalizacao.demandas AS d
-                            SET 
-                                situacao_id = u.situacao_id,
-                                fiscalizado_id = u.fiscalizado_id
-                            FROM (
-                                SELECT * FROM unnest(
-                                    ${dbDestino.array(ids)}::int[],
-                                    ${dbDestino.array(situacoes)}::int[],
-                                    ${dbDestino.array(fiscalizados)}::int[]
-                                ) AS t(id, situacao_id, fiscalizado_id)
-                            ) AS u
-                            WHERE d.id = u.id
+                    // UPDATE usando tabela temporária - sem limites de protocolo
+                    await dbDestino.begin(async (tx) => {
+                        // Criar tabela temporária
+                        await tx`
+                            CREATE TEMP TABLE tmp_update_demandas (
+                                id INT,
+                                situacao_id INT,
+                                fiscalizado_id INT
+                            ) ON COMMIT DROP
                         `;
 
-                        sucessoLote += miniLote.length;
-                    }
+                        // Inserir dados em lotes pequenos na temp table
+                        const CHUNK_SIZE = 100;
+                        for (let j = 0; j < dadosMapeados.length; j += CHUNK_SIZE) {
+                            const chunk = dadosMapeados.slice(j, j + CHUNK_SIZE);
+                            await tx`
+                                INSERT INTO tmp_update_demandas 
+                                ${tx(chunk, 'id', 'situacao_id', 'fiscalizado_id')}
+                            `;
+                        }
+
+                        // UPDATE em massa usando a temp table
+                        await tx`
+                            UPDATE fiscalizacao.demandas d
+                            SET 
+                                situacao_id = t.situacao_id,
+                                fiscalizado_id = t.fiscalizado_id
+                            FROM tmp_update_demandas t
+                            WHERE d.id = t.id
+                        `;
+                    });
+
+                    sucessoLote = demandasOrigem.length;
                 } catch (error) {
                     console.error(`  ❌ Erro no bulk update:`, error.message);
                     errosLote = demandasOrigem.length;
