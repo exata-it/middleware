@@ -260,7 +260,7 @@ async function sincronizarDemandasExistentes(verbose = false) {
         }
 
         // 2. Processar em lotes para otimizar
-        const LOTE_SIZE = 200;
+        const LOTE_SIZE = 100; // Reduzido para evitar queries SQL muito grandes
         const totalLotes = Math.ceil(demandasDestino.length / LOTE_SIZE);
         
         if (verbose) {
@@ -325,26 +325,33 @@ async function sincronizarDemandasExistentes(verbose = false) {
                         .filter(id => id != null);
                     await sincronizarPessoasFaltantes(fiscalizadosIds);
 
-                    // Criar arrays para BULK UPDATE
-                    const ids = dadosMapeados.map(d => d.id);
-                    const situacoes = dadosMapeados.map(d => d.situacao_id);
-                    const fiscalizados = dadosMapeados.map(d => d.fiscalizado_id);
+                    // UPDATE em lotes menores para evitar "insufficient data left in message"
+                    const MINI_LOTE_SIZE = 25; // Reduzido para evitar exceder limite de protocolo PostgreSQL
+                    for (let j = 0; j < dadosMapeados.length; j += MINI_LOTE_SIZE) {
+                        const miniLote = dadosMapeados.slice(j, j + MINI_LOTE_SIZE);
+                        
+                        // Usar UPDATE com unnest() - método mais eficiente e seguro
+                        const ids = miniLote.map(d => d.id);
+                        const situacoes = miniLote.map(d => d.situacao_id);
+                        const fiscalizados = miniLote.map(d => d.fiscalizado_id);
 
-                    // UPDATE em massa - criar cases SQL dinamicamente
-                    const caseSituacao = ids.map((id, idx) => `WHEN ${id} THEN ${situacoes[idx]}`).join(' ');
-                    const caseFiscalizado = ids.map((id, idx) => 
-                        fiscalizados[idx] !== null ? `WHEN ${id} THEN ${fiscalizados[idx]}` : `WHEN ${id} THEN NULL`
-                    ).join(' ');
+                        await dbDestino`
+                            UPDATE fiscalizacao.demandas AS d
+                            SET 
+                                situacao_id = u.situacao_id,
+                                fiscalizado_id = u.fiscalizado_id
+                            FROM (
+                                SELECT * FROM unnest(
+                                    ${dbDestino.array(ids)}::int[],
+                                    ${dbDestino.array(situacoes)}::int[],
+                                    ${dbDestino.array(fiscalizados)}::int[]
+                                ) AS t(id, situacao_id, fiscalizado_id)
+                            ) AS u
+                            WHERE d.id = u.id
+                        `;
 
-                    await dbDestino.unsafe(`
-                        UPDATE fiscalizacao.demandas
-                        SET 
-                            situacao_id = CASE id ${caseSituacao} END,
-                            fiscalizado_id = CASE id ${caseFiscalizado} END
-                        WHERE id IN (${ids.join(',')})
-                    `);
-
-                    sucessoLote = demandasOrigem.length;
+                        sucessoLote += miniLote.length;
+                    }
                 } catch (error) {
                     console.error(`  ❌ Erro no bulk update:`, error.message);
                     errosLote = demandasOrigem.length;
