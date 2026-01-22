@@ -487,7 +487,7 @@ async function processarNotificacao(payload) {
     try {
         const { id, table, event_type } = JSON.parse(payload);
 
-        console.log(`📨 Recebido: ${event_type} na tabela ${table} (ID: ${id})`);
+        // console.log(`📨 Recebido: ${event_type} na tabela ${table} (ID: ${id})`);
 
         // Verifica se temos um handler para esta tabela
         const handler = HANDLERS[table];

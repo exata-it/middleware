@@ -325,41 +325,36 @@ async function sincronizarDemandasExistentes(verbose = false) {
                         .filter(id => id != null);
                     await sincronizarPessoasFaltantes(fiscalizadosIds);
 
-                    // UPDATE usando tabela temporária - sem limites de protocolo
-                    await dbDestino.begin(async (tx) => {
-                        // Criar tabela temporária
-                        await tx`
-                            CREATE TEMP TABLE tmp_update_demandas (
-                                id INT,
-                                situacao_id INT,
-                                fiscalizado_id INT
-                            ) ON COMMIT DROP
-                        `;
+                    // UPDATE usando UNNEST - mais eficiente e sem problemas de buffer
+                    // Dividir em chunks menores para evitar buffer overflow
+                    const CHUNK_SIZE = 50; // Reduzido para evitar "insufficient data left in message"
+                    
+                    for (let j = 0; j < dadosMapeados.length; j += CHUNK_SIZE) {
+                        const chunk = dadosMapeados.slice(j, j + CHUNK_SIZE);
+                        
+                        const ids = chunk.map(d => d.id);
+                        const situacoes = chunk.map(d => d.situacao_id);
+                        const fiscalizados = chunk.map(d => d.fiscalizado_id);
 
-                        // Inserir dados em lotes pequenos na temp table
-                        const CHUNK_SIZE = 100;
-                        for (let j = 0; j < dadosMapeados.length; j += CHUNK_SIZE) {
-                            const chunk = dadosMapeados.slice(j, j + CHUNK_SIZE);
-                            await tx`
-                                INSERT INTO tmp_update_demandas 
-                                ${tx(chunk, 'id', 'situacao_id', 'fiscalizado_id')}
-                            `;
-                        }
-
-                        // UPDATE em massa usando a temp table
-                        await tx`
+                        await dbDestino`
                             UPDATE fiscalizacao.demandas d
                             SET 
-                                situacao_id = t.situacao_id,
-                                fiscalizado_id = t.fiscalizado_id
-                            FROM tmp_update_demandas t
-                            WHERE d.id = t.id
+                                situacao_id = v.situacao_id,
+                                fiscalizado_id = v.fiscalizado_id
+                            FROM (
+                                SELECT 
+                                    UNNEST(${ids}::int[]) as id,
+                                    UNNEST(${situacoes}::int[]) as situacao_id,
+                                    UNNEST(${fiscalizados}::int[]) as fiscalizado_id
+                            ) v
+                            WHERE d.id = v.id
                         `;
-                    });
+                    }
 
                     sucessoLote = demandasOrigem.length;
                 } catch (error) {
                     console.error(`  ❌ Erro no bulk update:`, error.message);
+                    console.error(`  📊 Stack:`, error.stack);
                     errosLote = demandasOrigem.length;
                 }
             }
@@ -439,57 +434,59 @@ async function verificarGapsFiscalDemanda(verbose = false) {
             console.log(`📊 ${origemRegistros.length} fiscal-demandas encontradas na origem`);
         }
 
-        // 2. Executar tudo em uma única transação com tabela temporária
-        const resultado = await dbDestino.begin(async (tx) => {
-            // Criar tabela temporária
-            await tx`
-                CREATE TEMP TABLE tmp_reconcile_fiscal (
-                    demanda_id INT,
-                    fiscal_id INT
-                ) ON COMMIT DROP
-            `;
+        // Mapear usuario_id para fiscal_id e converter para INT
+        const dadosParaInserir = origemRegistros.map(r => ({
+            demanda_id: typeof r.demanda_id === 'string' ? parseInt(r.demanda_id, 10) : r.demanda_id,
+            fiscal_id: typeof r.usuario_id === 'string' ? parseInt(r.usuario_id, 10) : r.usuario_id
+        }));
 
-            // Mapear usuario_id para fiscal_id e converter para INT
-            const dadosParaInserir = origemRegistros.map(r => ({
-                demanda_id: typeof r.demanda_id === 'string' ? parseInt(r.demanda_id, 10) : r.demanda_id,
-                fiscal_id: typeof r.usuario_id === 'string' ? parseInt(r.usuario_id, 10) : r.usuario_id
-            }));
+        if (verbose) {
+            console.log(`🔍 Validando registros (demandas e fiscais devem existir)...`);
+        }
 
-            // Inserção em massa na tabela temporária
-            await tx`
-                INSERT INTO tmp_reconcile_fiscal ${tx(dadosParaInserir, 'demanda_id', 'fiscal_id')}
-            `;
+        // Processar em lotes menores para evitar "insufficient data left in message"
+        const CHUNK_SIZE = 100;
+        let totalInseridos = 0;
 
-            if (verbose) {
-                console.log(`🔍 Validando registros (demandas e fiscais devem existir)...`);
-            }
+        for (let i = 0; i < dadosParaInserir.length; i += CHUNK_SIZE) {
+            const chunk = dadosParaInserir.slice(i, i + CHUNK_SIZE);
+            
+            // Extrair arrays de IDs
+            const demandasIds = chunk.map(d => d.demanda_id);
+            const fiscaisIds = chunk.map(d => d.fiscal_id);
 
-            // Sincronização inteligente via SQL - valida que demanda E fiscal existem
-            return await tx`
+            // Sincronização via UNNEST ao invés de temp table
+            const resultado = await dbDestino`
                 INSERT INTO fiscalizacao.demandas_fiscais (demanda_id, fiscal_id)
                 SELECT 
-                    t.demanda_id, 
-                    t.fiscal_id
-                FROM tmp_reconcile_fiscal t
-                INNER JOIN fiscalizacao.demandas d ON d.id = t.demanda_id
-                INNER JOIN fiscalizacao.fiscais f ON f.id = t.fiscal_id
+                    v.demanda_id, 
+                    v.fiscal_id
+                FROM (
+                    SELECT 
+                        UNNEST(${demandasIds}::int[]) as demanda_id,
+                        UNNEST(${fiscaisIds}::int[]) as fiscal_id
+                ) v
+                INNER JOIN fiscalizacao.demandas d ON d.id = v.demanda_id
+                INNER JOIN fiscalizacao.fiscais f ON f.id = v.fiscal_id
                 WHERE NOT EXISTS (
                     SELECT 1 FROM fiscalizacao.demandas_fiscais df 
-                    WHERE df.demanda_id = t.demanda_id AND df.fiscal_id = t.fiscal_id
+                    WHERE df.demanda_id = v.demanda_id AND df.fiscal_id = v.fiscal_id
                 )
                 ON CONFLICT (demanda_id, fiscal_id) DO NOTHING
                 RETURNING demanda_id, fiscal_id
             `;
-        });
+            
+            totalInseridos += resultado.length;
+        }
 
         const end = performance.now();
         const duration = ((end - start) / 1000).toFixed(2);
 
-        if (resultado.length > 0) {
+        if (totalInseridos > 0) {
             if (verbose) {
-                console.log(`✅ Fiscal-Demanda: ${resultado.length} registros restaurados em ${duration}s.`);
+                console.log(`✅ Fiscal-Demanda: ${totalInseridos} registros restaurados em ${duration}s.`);
             } else {
-                console.log(`✅ Reconciliação Fiscal-Demanda: ${resultado.length} registros em ${duration}s`);
+                console.log(`✅ Reconciliação Fiscal-Demanda: ${totalInseridos} registros em ${duration}s`);
             }
         } else {
             if (verbose) {
