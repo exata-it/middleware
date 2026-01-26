@@ -25,6 +25,7 @@ export function mapearDemanda(dataOrigem, dadosPessoa = null) {
     const grupo_ocorrencia_id = normalizarId(dataOrigem.grupodemanda_id);
     const fiscalizado_id = normalizarId(dataOrigem.fiscalizado_id);
     const situacao_id = normalizarId(dataOrigem.situacao);
+    const operacao_id = normalizarId(dataOrigem.operacao_id);
 
     // Dados do fiscalizado
     let fiscalizado_nome = "";
@@ -46,6 +47,7 @@ export function mapearDemanda(dataOrigem, dadosPessoa = null) {
         motivo_id: null, // Não existe na origem
         fiscal_id: null, // Será preenchido depois se necessário
         fiscalizado_id: fiscalizado_id,
+        operacao_id: operacao_id, // ID da operação (se for demanda de operação)
 
         // Identificação da demanda
         fiscalizado_demanda: dataOrigem.descricao || dataOrigem.protocolo || `DEMANDA-${dataOrigem.id}`,
@@ -67,7 +69,7 @@ export function mapearDemanda(dataOrigem, dadosPessoa = null) {
         fiscalizado_lng: dataOrigem.longitude || "",
 
         // Classificação da demanda
-        classificacao: situacao_id === 12 ? "direta" : situacao_id === 2 || situacao_id === 7 ? "ordinaria" : "N/A",
+        classificacao: operacao_id ? "operacao" : (situacao_id === 12 ? "direta" : situacao_id === 2 || situacao_id === 7 ? "ordinaria" : "N/A"),
 
         // Datas importantes
         data_criacao: dataOrigem.data_criacao,

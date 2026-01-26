@@ -36,6 +36,216 @@ async function sincronizarPessoasFaltantes(fiscalizadosIds) {
 } 
 
 /**
+ * Verifica gaps de operações
+ * Sincroniza operações da origem (public.operacao) para destino (fiscalizacao.operacao)
+ * @param {boolean} verbose - Se true, mostra logs detalhados
+ */
+async function verificarGapsOperacoes(verbose = false) {
+    if (verbose) {
+        console.log("\n🎯 Reconciliando OPERAÇÕES...");
+    }
+
+    try {
+        // Buscar todas as operações ativas da origem
+        const origemOperacoes = await dbOrigem`
+            SELECT * FROM public.operacao 
+            WHERE ativo = true
+            ORDER BY id DESC
+        `;
+
+        if (origemOperacoes.length === 0) {
+            if (verbose) {
+                console.log("📭 Nenhuma operação na origem para verificar");
+            }
+            return;
+        }
+
+        if (verbose) {
+            console.log(`📊 Encontradas ${origemOperacoes.length} operações na origem`);
+        }
+
+        // Buscar operações já existentes no destino
+        const destinoOperacoes = await dbDestino`
+            SELECT id FROM fiscalizacao.operacao
+        `;
+
+        const setDestino = new Set(destinoOperacoes.map((op) => op.id));
+        const faltantes = origemOperacoes.filter((op) => !setDestino.has(op.id));
+
+        if (faltantes.length > 0) {
+            if (verbose) {
+                console.warn(`⚠️ Encontradas ${faltantes.length} operações faltando no destino!`);
+            }
+
+            let sincronizados = 0;
+            let erros = 0;
+
+            // Inserir em bulk usando transação
+            try {
+                await dbDestino.begin(async sql => {
+                    for (const op of faltantes) {
+                        await sql`
+                            INSERT INTO fiscalizacao.operacao (
+                                id, ativo, data_criacao, usuarioalteracao, descricao, 
+                                nome, requeracompanhamento, grupodemanda_id, 
+                                pessoageradora_id, unidadeoperacional_id
+                            )
+                            VALUES (
+                                ${op.id},
+                                ${op.ativo ?? true},
+                                ${op.datacriacao || new Date()},
+                                ${op.usuarioalteracao || null},
+                                ${op.descricao || null},
+                                ${op.nome || ''},
+                                ${op.requeracompanhamento ?? false},
+                                ${op.grupodemanda_id || null},
+                                ${op.pessoageradora_id || null},
+                                ${op.unidadeoperacional_id || null}
+                            )
+                            ON CONFLICT (id) DO NOTHING
+                        `;
+                    }
+                });
+                sincronizados = faltantes.length;
+
+                if (verbose) {
+                    console.log(`✅ ${sincronizados} operações sincronizadas com sucesso`);
+                }
+            } catch (error) {
+                console.error(`❌ Erro ao sincronizar operações:`, error.message);
+                erros = faltantes.length;
+            }
+
+            if (!verbose && sincronizados > 0) {
+                console.log(`✅ Operações: ${sincronizados} sincronizadas`);
+            }
+        } else {
+            if (verbose) {
+                console.log("✅ Operações: nenhuma inconsistência encontrada.");
+            }
+        }
+    } catch (error) {
+        console.error("❌ Erro ao verificar gaps de operações:", error.message);
+    }
+}
+
+/**
+ * Verifica gaps de fiscal-operação
+ * Sincroniza relações fiscal-operação da origem (public.fiscaloperacao) para destino (fiscalizacao.fiscaloperacao)
+ * @param {boolean} verbose - Se true, mostra logs detalhados
+ */
+async function verificarGapsFiscalOperacao(verbose = false) {
+    if (verbose) {
+        console.log("\n👥 Reconciliando FISCAL-OPERAÇÃO...");
+    }
+
+    try {
+        // Buscar todos os registros ativos da origem
+        const origemRegistros = await dbOrigem`
+            SELECT * FROM public.fiscaloperacao 
+            WHERE ativo = true
+            ORDER BY id DESC
+        `;
+
+        if (origemRegistros.length === 0) {
+            if (verbose) {
+                console.log("📭 Nenhum registro de fiscal-operação na origem");
+            }
+            return;
+        }
+
+        if (verbose) {
+            console.log(`📊 Encontrados ${origemRegistros.length} registros na origem`);
+        }
+
+        // Buscar registros já existentes no destino
+        const destinoRegistros = await dbDestino`
+            SELECT id FROM fiscalizacao.fiscaloperacao
+        `;
+
+        const setDestino = new Set(destinoRegistros.map((r) => r.id));
+        const faltantes = origemRegistros.filter((r) => !setDestino.has(r.id));
+
+        if (faltantes.length > 0) {
+            if (verbose) {
+                console.warn(`⚠️ Encontrados ${faltantes.length} registros de fiscal-operação faltando!`);
+            }
+
+            let sincronizados = 0;
+            let erros = 0;
+
+            // Inserir em bulk usando tabela temporária
+            try {
+                // Criar tabela temporária
+                await dbDestino`
+                    CREATE TEMP TABLE IF NOT EXISTS temp_fiscaloperacao_sync (
+                        id INT PRIMARY KEY,
+                        ativo BOOLEAN,
+                        data_criacao TIMESTAMP,
+                        datainicio TIMESTAMP,
+                        datafim TIMESTAMP,
+                        usuario_id INT,
+                        operacao_id INT
+                    )
+                `;
+
+                // Limpar tabela temporária
+                await dbDestino`TRUNCATE temp_fiscaloperacao_sync`;
+
+                // Bulk insert na temp table (ignorar usuarioalteracao pois é string na origem)
+                await dbDestino`
+                    INSERT INTO temp_fiscaloperacao_sync ${dbDestino(
+                        faltantes.map(r => ({
+                            id: parseInt(r.id, 10),
+                            ativo: r.ativo ?? true,
+                            data_criacao: r.data_criacao || new Date(),
+                            datainicio: r.datainicio,
+                            datafim: r.datafim,
+                            usuario_id: parseInt(r.usuario_id, 10),
+                            operacao_id: parseInt(r.operacao_id, 10)
+                        }))
+                    )}
+                `;
+
+                // Inserir da temp para a real filtrando FKs válidas
+                const result = await dbDestino`
+                    INSERT INTO fiscalizacao.fiscaloperacao (
+                        id, ativo, data_criacao,
+                        datainicio, datafim, usuario_id, operacao_id
+                    )
+                    SELECT 
+                        t.id, t.ativo, t.data_criacao,
+                        t.datainicio, t.datafim, t.usuario_id, t.operacao_id
+                    FROM temp_fiscaloperacao_sync t
+                    WHERE EXISTS (SELECT 1 FROM seguranca.usuarios WHERE id = t.usuario_id)
+                      AND EXISTS (SELECT 1 FROM fiscalizacao.operacao WHERE id = t.operacao_id)
+                    ON CONFLICT (id) DO NOTHING
+                `;
+
+                sincronizados = result.count || faltantes.length;
+
+                if (verbose) {
+                    console.log(`✅ ${sincronizados} registros de fiscal-operação sincronizados`);
+                }
+            } catch (error) {
+                console.error(`❌ Erro ao sincronizar fiscal-operação:`, error.message);
+                erros = faltantes.length;
+            }
+
+            if (!verbose && sincronizados > 0) {
+                console.log(`✅ Fiscal-Operação: ${sincronizados} sincronizados`);
+            }
+        } else {
+            if (verbose) {
+                console.log("✅ Fiscal-Operação: nenhuma inconsistência encontrada.");
+            }
+        }
+    } catch (error) {
+        console.error("❌ Erro ao verificar gaps de fiscal-operação:", error.message);
+    }
+}
+
+/**
  * Busca o registro completo no banco de origem pelo ID
  * * @param {string} table - Nome da tabela no formato "schema.tabela"
  * @param {number} id - ID do registro
@@ -52,6 +262,12 @@ export async function buscarRegistroOrigem(table, id) {
                 break;
             case "public.fiscaldemanda":
                 resultado = await dbOrigem`SELECT * FROM public.fiscaldemanda WHERE id = ${id}`;
+                break;
+            case "public.operacao":
+                resultado = await dbOrigem`SELECT * FROM public.operacao WHERE id = ${id}`;
+                break;
+            case "public.fiscaloperacao":
+                resultado = await dbOrigem`SELECT * FROM public.fiscaloperacao WHERE id = ${id}`;
                 break;
             default:
                 console.error(`❌ Tabela não suportada: ${table}`);
@@ -74,312 +290,215 @@ export async function verificarGaps(verbose = false) {
         console.log("\n🔍 Verificando inconsistências (Reconciliação)...");
     }
 
-    await verificarGapsDemandas(verbose);
-    await sincronizarDemandasExistentes(verbose);
+    await verificarGapsOperacoes(verbose);
+    await verificarGapsFiscalOperacao(verbose);
+    await sincronizarDemandasOrigem(verbose);
     await verificarGapsFiscalDemanda(verbose);
 }
 
 /**
- * Verifica gaps de demandas
- * (Mantido a lógica original pois demandas possuem complexidade de relacionamentos que o handler trata)
+ * Sincroniza TODAS as demandas com situação 2, 11, 12 da origem para o destino
+ * Faz UPSERT: insere se não existir, atualiza se existir
  * @param {boolean} verbose - Se true, mostra logs detalhados
  */
-async function verificarGapsDemandas(verbose = false) {
+async function sincronizarDemandasOrigem(verbose = false) {
     if (verbose) {
-        console.log("\n📋 Reconciliando DEMANDAS...");
+        console.log("\n📋 Sincronizando DEMANDAS da origem (situação 2, 11, 12)...");
     }
 
     try {
-        // Pega os últimos 5000 IDs da origem
-        const origemIds = await dbOrigem`
-            SELECT id FROM public.demanda 
+        // Buscar TODAS as demandas com situação 2, 11, 12 na origem
+        const demandasOrigem = await dbOrigem`
+            SELECT * FROM public.demanda 
             WHERE situacao IN (2, 11, 12)
             ORDER BY id DESC LIMIT 20000
         `;
 
-        if (origemIds.length === 0) {
+        if (demandasOrigem.length === 0) {
             if (verbose) {
-                console.log("📭 Nenhum registro na origem para verificar");
-            }
-            return;
-        }
-
-        const minId = origemIds[origemIds.length - 1].id;
-        const maxId = origemIds[0].id;
-
-        if (verbose) {
-            console.log(`🔍 Verificando range: ${minId} até ${maxId}`);
-        }
-
-        // Pega o que temos no destino nesse range
-        const destinoIds = await dbDestino`
-            SELECT id FROM fiscalizacao.demandas 
-            WHERE id BETWEEN ${minId} AND ${maxId}
-        `;
-
-        // Cria Sets para comparação rápida (converter IDs da origem para número se necessário)
-        const origemIdsNumeros = origemIds.map(d => typeof d.id === 'string' ? parseInt(d.id, 10) : d.id);
-        const setDestino = new Set(destinoIds.map((d) => d.id));
-
-        // Filtra quem está na origem mas NÃO no destino
-        const faltantes = origemIdsNumeros.filter((id) => !setDestino.has(id)).map(id => ({id}));
-
-        if (faltantes.length > 0) {
-            if (verbose) {
-                console.warn(`⚠️ Encontrados ${faltantes.length} demandas faltando!`);
-            }
-            
-            // Processar em lotes de 100 para otimizar
-            const LOTE_SIZE = 200;
-            const totalLotes = Math.ceil(faltantes.length / LOTE_SIZE);
-            
-            if (verbose) {
-                console.log(`📦 Processando em ${totalLotes} lotes de até ${LOTE_SIZE} demandas...\n`);
-            }
-
-            let sincronizadosTotal = 0;
-            let errosTotal = 0;
-
-            for (let i = 0; i < faltantes.length; i += LOTE_SIZE) {
-                const lote = faltantes.slice(i, i + LOTE_SIZE);
-                const loteNum = Math.floor(i / LOTE_SIZE) + 1;
-                
-                if (verbose) {
-                    console.log(`📋 Lote ${loteNum}/${totalLotes} (${lote.length} demandas)...`);
-                }
-
-                // Buscar TODAS as demandas do lote de uma vez (OTIMIZADO)
-                // Normalizar IDs para evitar problemas de tipo
-                const idsLote = lote.map(item => {
-                    const id = item.id;
-                    return typeof id === 'string' ? parseInt(id, 10) : id;
-                });
-                
-                if (verbose) {
-                    console.log(`  📝 IDs do lote:`, idsLote.slice(0, 5)); // Mostrar primeiros 5 IDs
-                }
-                
-                const demandasOrigem = await dbOrigem`
-                    SELECT * FROM public.demanda WHERE id = ANY(${idsLote})
-                `;
-
-                if (demandasOrigem.length === 0) continue;
-
-                if (verbose) {
-                    console.log(`  📦 Encontradas ${demandasOrigem.length} demandas na origem`);
-                    // Verificar se algum ID tem problema
-                    const primeiroId = demandasOrigem[0]?.id;
-                    console.log(`  🔍 Primeiro ID tipo: ${typeof primeiroId}, valor:`, JSON.stringify(primeiroId));
-                }
-
-                // PRÉ-SINCRONIZAR pessoas faltantes para evitar FK errors no bulk
-                // Normalizar IDs de fiscalizados para número
-                const fiscalizadosIds = demandasOrigem
-                    .map(d => d.fiscalizado_id)
-                    .filter(id => id != null)
-                    .map(id => typeof id === 'string' ? parseInt(id, 10) : id);
-                
-                if (verbose && fiscalizadosIds.length > 0) {
-                    console.log(`  👥 Fiscalizados IDs (primeiros 3):`, fiscalizadosIds.slice(0, 3));
-                }
-                await sincronizarPessoasFaltantes(fiscalizadosIds);
-
-                // Preparar dados para bulk (dados já mapeados e validados)
-                const demandasParaBulk = demandasOrigem.map(d => ({
-                    data: d,
-                    dadosPessoa: null // Pessoas já foram sincronizadas acima
-                }));
-
-                if (verbose) {
-                    console.log(`  📦 Chamando sincronizarDemandasBulk com ${demandasParaBulk.length} demandas...`);
-                }
-
-                // Inserir em BULK (muito mais rápido)
-                try {
-                    const resultado = await sincronizarDemandasBulk(demandasParaBulk);
-                    
-                    sincronizadosTotal += resultado.sucesso;
-                    errosTotal += resultado.erros;
-
-                    if (verbose) {
-                        console.log(`  ✅ ${resultado.sucesso} OK, ${resultado.erros} erros\n`);
-                    }
-                } catch (bulkError) {
-                    console.error(`  ❌ Erro no bulk insert:`, bulkError.message);
-                    errosTotal += demandasParaBulk.length;
-                }
-            }
-
-            if (verbose) {
-                console.log(`\n${"=".repeat(60)}`);
-                console.log(`📊 TOTAL: ${sincronizadosTotal} sincronizadas, ${errosTotal} erros`);
-                console.log("=".repeat(60));
-            } else if (sincronizadosTotal > 0 || errosTotal > 0) {
-                // Em modo silencioso, mostrar apenas resumo se houve mudanças
-                console.log(`✅ Reconciliação: ${sincronizadosTotal} sincronizadas, ${errosTotal} erros`);
-            }
-        } else {
-            if (verbose) {
-                console.log("✅ Demandas: nenhuma inconsistência encontrada.");
-            }
-        }
-    } catch (error) {
-        console.error("❌ Erro ao verificar gaps de demandas:", error.message);
-    }
-}
-
-/**
- * Sincroniza demandas existentes no destino com dados atualizados da origem
- * Atualiza situacao_id e fiscalizado_id das demandas com situação 2, 11 ou 12
- * @param {boolean} verbose - Se true, mostra logs detalhados
- */
-async function sincronizarDemandasExistentes(verbose = false) {
-    if (verbose) {
-        console.log("\n🔄 Sincronizando demandas existentes no destino...");
-    }
-
-    try {
-        // 1. Buscar demandas RECENTES no destino com situação 2, 11 ou 12
-        // LIMIT para evitar sobrecarga de memória e focar nas mais relevantes
-        const demandasDestino = await dbDestino`
-            SELECT id FROM fiscalizacao.demandas
-            WHERE situacao_id IN (2, 11, 12)
-            ORDER BY id DESC
-            LIMIT 10000
-        `;
-
-        if (demandasDestino.length === 0) {
-            if (verbose) {
-                console.log("📭 Nenhuma demanda no destino para sincronizar");
+                console.log("📭 Nenhuma demanda na origem com situação 2, 11, 12");
             }
             return;
         }
 
         if (verbose) {
-            console.log(`✅ Encontradas ${demandasDestino.length} demandas no destino (últimas 10k)`);
+            console.log(`📊 Encontradas ${demandasOrigem.length} demandas na origem`);
         }
 
-        // 2. Processar em lotes para otimizar
-        const LOTE_SIZE = 100; // Reduzido para evitar queries SQL muito grandes
-        const totalLotes = Math.ceil(demandasDestino.length / LOTE_SIZE);
+        // Processar em lotes
+        const LOTE_SIZE = 100;
+        const totalLotes = Math.ceil(demandasOrigem.length / LOTE_SIZE);
         
         if (verbose) {
-            console.log(`📦 Processando ${demandasDestino.length} demandas em ${totalLotes} lotes de até ${LOTE_SIZE}...\n`);
+            console.log(`📦 Processando em ${totalLotes} lotes de até ${LOTE_SIZE} demandas...\n`);
         }
 
         let sincronizadosTotal = 0;
         let errosTotal = 0;
-        let naoEncontradosOrigem = 0;
 
-        for (let i = 0; i < demandasDestino.length; i += LOTE_SIZE) {
-            const lote = demandasDestino.slice(i, i + LOTE_SIZE);
+        for (let i = 0; i < demandasOrigem.length; i += LOTE_SIZE) {
+            const lote = demandasOrigem.slice(i, i + LOTE_SIZE);
             const loteNum = Math.floor(i / LOTE_SIZE) + 1;
             
             if (verbose) {
                 console.log(`📋 Lote ${loteNum}/${totalLotes} (${lote.length} demandas)...`);
             }
 
-            // Buscar dados das demandas na ORIGEM
-            const idsLote = lote.map(item => item.id);
-            const demandasOrigem = await dbOrigem`
-                SELECT * FROM public.demanda 
-                WHERE id = ANY(${idsLote})
-            `;
+            // PRÉ-SINCRONIZAR pessoas faltantes para evitar FK errors
+            const fiscalizadosIds = lote
+                .map(d => d.fiscalizado_id)
+                .filter(id => id != null)
+                .map(id => typeof id === 'string' ? parseInt(id, 10) : id);
+            
+            await sincronizarPessoasFaltantes(fiscalizadosIds);
 
-            if (demandasOrigem.length === 0) {
+            // Mapear todas as demandas do lote
+            const dadosMapeados = lote.map(d => {
+                const mapped = mapearDemanda(d, null);
+                return {
+                    id: parseInt(mapped.id, 10),
+                    situacao_id: parseInt(mapped.situacao_id, 10),
+                    fiscalizado_id: mapped.fiscalizado_id ? parseInt(mapped.fiscalizado_id, 10) : null,
+                    operacao_id: mapped.operacao_id ? parseInt(mapped.operacao_id, 10) : null,
+                    classificacao: mapped.classificacao,
+                    fiscalizado_demanda: mapped.fiscalizado_demanda,
+                    fiscalizado_cpf_cnpj: mapped.fiscalizado_cpf_cnpj,
+                    fiscalizado_nome: mapped.fiscalizado_nome,
+                    fiscalizado_logradouro: mapped.fiscalizado_logradouro,
+                    fiscalizado_numero: mapped.fiscalizado_numero,
+                    fiscalizado_complemento: mapped.fiscalizado_complemento,
+                    fiscalizado_bairro: mapped.fiscalizado_bairro,
+                    fiscalizado_municipio: mapped.fiscalizado_municipio,
+                    fiscalizado_uf: mapped.fiscalizado_uf,
+                    fiscalizado_lat: mapped.fiscalizado_lat,
+                    fiscalizado_lng: mapped.fiscalizado_lng,
+                    data_criacao: mapped.data_criacao,
+                    data_realizacao: mapped.data_realizacao,
+                    ativo: mapped.ativo,
+                    tipo_rota: mapped.tipo_rota,
+                    grupo_ocorrencia_id: mapped.grupo_ocorrencia_id
+                };
+            });
+
+            try {
+                // UPSERT em bulk usando uma única query com múltiplos valores
+                // Primeiro, criar uma tabela temporária
+                await dbDestino`
+                    CREATE TEMP TABLE IF NOT EXISTS temp_demandas_sync (
+                        id INT PRIMARY KEY,
+                        situacao_id INT,
+                        fiscalizado_id INT,
+                        operacao_id INT,
+                        classificacao TEXT,
+                        fiscalizado_demanda TEXT,
+                        fiscalizado_cpf_cnpj TEXT,
+                        fiscalizado_nome TEXT,
+                        fiscalizado_logradouro TEXT,
+                        fiscalizado_numero TEXT,
+                        fiscalizado_complemento TEXT,
+                        fiscalizado_bairro TEXT,
+                        fiscalizado_municipio TEXT,
+                        fiscalizado_uf TEXT,
+                        fiscalizado_lat FLOAT,
+                        fiscalizado_lng FLOAT,
+                        data_criacao TIMESTAMP,
+                        data_realizacao TIMESTAMP,
+                        ativo BOOLEAN,
+                        tipo_rota TEXT,
+                        grupo_ocorrencia_id INT
+                    )
+                `;
+
+                // Limpar tabela temporária
+                await dbDestino`TRUNCATE temp_demandas_sync`;
+
+                // Inserir todos os dados na temp table de uma vez
+                await dbDestino`
+                    INSERT INTO temp_demandas_sync ${dbDestino(
+                        dadosMapeados.map(d => ({
+                            id: d.id,
+                            situacao_id: d.situacao_id,
+                            fiscalizado_id: d.fiscalizado_id,
+                            operacao_id: d.operacao_id,
+                            classificacao: d.classificacao,
+                            fiscalizado_demanda: d.fiscalizado_demanda,
+                            fiscalizado_cpf_cnpj: d.fiscalizado_cpf_cnpj,
+                            fiscalizado_nome: d.fiscalizado_nome,
+                            fiscalizado_logradouro: d.fiscalizado_logradouro,
+                            fiscalizado_numero: d.fiscalizado_numero,
+                            fiscalizado_complemento: d.fiscalizado_complemento,
+                            fiscalizado_bairro: d.fiscalizado_bairro,
+                            fiscalizado_municipio: d.fiscalizado_municipio,
+                            fiscalizado_uf: d.fiscalizado_uf,
+                            fiscalizado_lat: d.fiscalizado_lat,
+                            fiscalizado_lng: d.fiscalizado_lng,
+                            data_criacao: d.data_criacao,
+                            data_realizacao: d.data_realizacao,
+                            ativo: d.ativo,
+                            tipo_rota: d.tipo_rota,
+                            grupo_ocorrencia_id: d.grupo_ocorrencia_id
+                        }))
+                    )}
+                `;
+
+                // Fazer UPSERT de uma vez da temp table para a real
+                await dbDestino`
+                    INSERT INTO fiscalizacao.demandas (
+                        id, situacao_id, motivo_id, fiscal_id, fiscalizado_id, operacao_id,
+                        fiscalizado_demanda, fiscalizado_cpf_cnpj, fiscalizado_nome,
+                        fiscalizado_logradouro, fiscalizado_numero, fiscalizado_complemento,
+                        fiscalizado_bairro, fiscalizado_municipio, fiscalizado_uf,
+                        fiscalizado_lat, fiscalizado_lng, classificacao,
+                        data_criacao, data_realizacao, ativo, tipo_rota, grupo_ocorrencia_id
+                    )
+                    SELECT 
+                        id, situacao_id, NULL, NULL, fiscalizado_id, operacao_id,
+                        fiscalizado_demanda, fiscalizado_cpf_cnpj, fiscalizado_nome,
+                        fiscalizado_logradouro, fiscalizado_numero, fiscalizado_complemento,
+                        fiscalizado_bairro, fiscalizado_municipio, fiscalizado_uf,
+                        fiscalizado_lat, fiscalizado_lng, classificacao::fiscalizacao.classificacao_os,
+                        data_criacao, data_realizacao, ativo, tipo_rota, grupo_ocorrencia_id
+                    FROM temp_demandas_sync
+                    ON CONFLICT (id) DO UPDATE SET
+                        situacao_id = EXCLUDED.situacao_id,
+                        fiscalizado_id = EXCLUDED.fiscalizado_id,
+                        operacao_id = EXCLUDED.operacao_id,
+                        fiscalizado_nome = EXCLUDED.fiscalizado_nome,
+                        fiscalizado_cpf_cnpj = EXCLUDED.fiscalizado_cpf_cnpj,
+                        fiscalizado_demanda = EXCLUDED.fiscalizado_demanda,
+                        fiscalizado_logradouro = EXCLUDED.fiscalizado_logradouro,
+                        fiscalizado_numero = EXCLUDED.fiscalizado_numero,
+                        fiscalizado_complemento = EXCLUDED.fiscalizado_complemento,
+                        fiscalizado_bairro = EXCLUDED.fiscalizado_bairro,
+                        fiscalizado_lat = EXCLUDED.fiscalizado_lat,
+                        fiscalizado_lng = EXCLUDED.fiscalizado_lng,
+                        classificacao = EXCLUDED.classificacao,
+                        data_realizacao = EXCLUDED.data_realizacao,
+                        ativo = EXCLUDED.ativo
+                `;
+
+                sincronizadosTotal += dadosMapeados.length;
+
                 if (verbose) {
-                    console.log(`  ⚠️  Nenhuma demanda encontrada na origem para este lote`);
+                    console.log(`  ✅ Lote processado\n`);
                 }
-                naoEncontradosOrigem += lote.length;
-                continue;
-            }
-
-            // Contar quantas não foram encontradas na origem
-            const idsEncontradosOrigem = new Set(demandasOrigem.map(d => typeof d.id === 'string' ? parseInt(d.id, 10) : d.id));
-            const naoEncontrados = lote.filter(d => !idsEncontradosOrigem.has(d.id));
-            naoEncontradosOrigem += naoEncontrados.length;
-
-            if (verbose && naoEncontrados.length > 0) {
-                console.log(`  ⚠️  ${naoEncontrados.length} demandas não encontradas na origem`);
-            }
-
-            // Processar demandas em BULK UPDATE usando tabela temporária
-            let sucessoLote = 0;
-            let errosLote = 0;
-
-            if (demandasOrigem.length > 0) {
-                try {
-                    // Mapear todas as demandas
-                    const dadosMapeados = demandasOrigem.map(d => {
-                        const mapped = mapearDemanda(d, null);
-                        return {
-                            id: parseInt(mapped.id, 10),
-                            situacao_id: parseInt(mapped.situacao_id, 10),
-                            fiscalizado_id: mapped.fiscalizado_id ? parseInt(mapped.fiscalizado_id, 10) : null
-                        };
-                    });
-
-                    // PRÉ-SINCRONIZAR pessoas faltantes para evitar FK errors
-                    const fiscalizadosIds = dadosMapeados
-                        .map(d => d.fiscalizado_id)
-                        .filter(id => id != null);
-                    await sincronizarPessoasFaltantes(fiscalizadosIds);
-
-                    // UPDATE usando UNNEST - mais eficiente e sem problemas de buffer
-                    // Dividir em chunks menores para evitar buffer overflow
-                    const CHUNK_SIZE = 50; // Reduzido para evitar "insufficient data left in message"
-                    
-                    for (let j = 0; j < dadosMapeados.length; j += CHUNK_SIZE) {
-                        const chunk = dadosMapeados.slice(j, j + CHUNK_SIZE);
-                        
-                        const ids = chunk.map(d => d.id);
-                        const situacoes = chunk.map(d => d.situacao_id);
-                        const fiscalizados = chunk.map(d => d.fiscalizado_id);
-
-                        await dbDestino`
-                            UPDATE fiscalizacao.demandas d
-                            SET 
-                                situacao_id = v.situacao_id,
-                                fiscalizado_id = v.fiscalizado_id
-                            FROM (
-                                SELECT 
-                                    UNNEST(${ids}::int[]) as id,
-                                    UNNEST(${situacoes}::int[]) as situacao_id,
-                                    UNNEST(${fiscalizados}::int[]) as fiscalizado_id
-                            ) v
-                            WHERE d.id = v.id
-                        `;
-                    }
-
-                    sucessoLote = demandasOrigem.length;
-                } catch (error) {
-                    console.error(`  ❌ Erro no bulk update:`, error.message);
-                    console.error(`  📊 Stack:`, error.stack);
-                    errosLote = demandasOrigem.length;
-                }
-            }
-
-            sincronizadosTotal += sucessoLote;
-            errosTotal += errosLote;
-
-            if (verbose) {
-                console.log(`  ✅ ${sucessoLote} atualizadas, ${errosLote} erros\n`);
+            } catch (error) {
+                console.error(`  ❌ Erro no lote:`, error.message);
+                errosTotal += lote.length;
             }
         }
 
         if (verbose) {
             console.log(`\n${"=".repeat(60)}`);
-            console.log(`📊 SINCRONIZAÇÃO DEMANDAS EXISTENTES:`);
-            console.log(`   ✅ Atualizadas: ${sincronizadosTotal}`);
-            console.log(`   ⚠️  Não encontradas na origem: ${naoEncontradosOrigem}`);
+            console.log(`📊 SINCRONIZAÇÃO DEMANDAS ORIGEM:`);
+            console.log(`   ✅ Sincronizadas: ${sincronizadosTotal}`);
             console.log(`   ❌ Erros: ${errosTotal}`);
             console.log("=".repeat(60));
         } else if (sincronizadosTotal > 0 || errosTotal > 0) {
-            console.log(`✅ Sync Demandas Existentes: ${sincronizadosTotal} atualizadas, ${errosTotal} erros`);
+            console.log(`✅ Demandas: ${sincronizadosTotal} sincronizadas, ${errosTotal} erros`);
         }
-
     } catch (error) {
-        console.error("❌ Erro ao sincronizar demandas existentes:", error.message);
+        console.error("❌ Erro ao sincronizar demandas da origem:", error.message);
     }
 }
 

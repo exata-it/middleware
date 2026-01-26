@@ -82,7 +82,7 @@ export async function sincronizarDemanda(event_type, data) {
 async function inserirDemanda(demanda) {
     await dbDestino`
         INSERT INTO fiscalizacao.demandas (
-            id, situacao_id, motivo_id, fiscal_id, fiscalizado_id,
+            id, situacao_id, motivo_id, fiscal_id, fiscalizado_id, operacao_id,
             fiscalizado_demanda, fiscalizado_cpf_cnpj, fiscalizado_nome,
             fiscalizado_logradouro, fiscalizado_numero, fiscalizado_complemento,
             fiscalizado_bairro, fiscalizado_municipio, fiscalizado_uf,
@@ -95,6 +95,7 @@ async function inserirDemanda(demanda) {
             ${demanda.motivo_id},
             ${demanda.fiscal_id},
             ${demanda.fiscalizado_id},
+            ${demanda.operacao_id},
             ${demanda.fiscalizado_demanda},
             ${demanda.fiscalizado_cpf_cnpj},
             ${demanda.fiscalizado_nome},
@@ -116,6 +117,7 @@ async function inserirDemanda(demanda) {
         ON CONFLICT (id) DO UPDATE SET
             situacao_id = EXCLUDED.situacao_id,
             fiscalizado_id = EXCLUDED.fiscalizado_id,
+            operacao_id = EXCLUDED.operacao_id,
             fiscalizado_nome = EXCLUDED.fiscalizado_nome,
             fiscalizado_cpf_cnpj = EXCLUDED.fiscalizado_cpf_cnpj,
             fiscalizado_demanda = EXCLUDED.fiscalizado_demanda,
@@ -147,6 +149,7 @@ async function atualizarDemanda(demanda) {
             UPDATE fiscalizacao.demandas SET
                 situacao_id = ${demanda.situacao_id},
                 fiscalizado_id = ${demanda.fiscalizado_id},
+                operacao_id = ${demanda.operacao_id},
                 fiscalizado_nome = ${demanda.fiscalizado_nome},
                 fiscalizado_cpf_cnpj = ${demanda.fiscalizado_cpf_cnpj},
                 fiscalizado_demanda = ${demanda.fiscalizado_demanda},
@@ -195,7 +198,7 @@ export async function sincronizarDemandasBulk(demandas) {
         await dbDestino`
             INSERT INTO fiscalizacao.demandas ${
                 dbDestino(demandasMapeadas, 
-                    'id', 'situacao_id', 'motivo_id', 'fiscal_id', 'fiscalizado_id',
+                    'id', 'situacao_id', 'motivo_id', 'fiscal_id', 'fiscalizado_id', 'operacao_id',
                     'fiscalizado_demanda', 'fiscalizado_cpf_cnpj', 'fiscalizado_nome',
                     'fiscalizado_logradouro', 'fiscalizado_numero', 'fiscalizado_complemento',
                     'fiscalizado_bairro', 'fiscalizado_municipio', 'fiscalizado_uf',
@@ -206,8 +209,10 @@ export async function sincronizarDemandasBulk(demandas) {
             ON CONFLICT (id) DO UPDATE SET
                 situacao_id = EXCLUDED.situacao_id,
                 fiscalizado_id = EXCLUDED.fiscalizado_id,
+                operacao_id = EXCLUDED.operacao_id,
                 fiscalizado_nome = EXCLUDED.fiscalizado_nome,
                 fiscalizado_cpf_cnpj = EXCLUDED.fiscalizado_cpf_cnpj,
+                classificacao = EXCLUDED.classificacao,
                 data_realizacao = EXCLUDED.data_realizacao,
                 ativo = EXCLUDED.ativo
         `;
